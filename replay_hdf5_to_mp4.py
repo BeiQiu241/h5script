@@ -25,9 +25,12 @@ OUTPUT_PATH = None
 OUTPUT_DIR = Path(r"D:\py projects\h5\mp4_output")
 FPS = 30.0
 CAMERAS = "head"
+#CAMERAS = "right_wrist"
 LAYOUT = "horizontal"
 LIMIT_FRAMES = None
 CODEC = "mp4v"
+FILENAME_SUFFIX = ""
+HDF5_SUFFIXES = (".h5", ".hdf5")
 
 
 def natural_key(path: Path) -> tuple:
@@ -91,16 +94,28 @@ def parse_args() -> argparse.Namespace:
         default="mp4v",
         help="OpenCV fourcc codec for MP4. Default: mp4v.",
     )
+    parser.add_argument(
+        "--filename-suffix",
+        type=str,
+        default="",
+        help="Optional suffix appended to generated MP4 filenames before .mp4.",
+    )
     return parser.parse_args()
 
 
 def find_hdf5_files(input_path: Path) -> list[Path]:
     if input_path.is_file():
+        if input_path.suffix.lower() not in HDF5_SUFFIXES:
+            raise ValueError(f"Unsupported input file type: {input_path}")
         return [input_path]
     if input_path.is_dir():
-        files = sorted(input_path.glob("*.hdf5"), key=natural_key)
+        files = [
+            path for path in input_path.iterdir()
+            if path.is_file() and path.suffix.lower() in HDF5_SUFFIXES
+        ]
+        files = sorted(files, key=natural_key)
         if not files:
-            raise FileNotFoundError(f"No .hdf5 files found in: {input_path}")
+            raise FileNotFoundError(f"No .h5 or .hdf5 files found in: {input_path}")
         return files
     raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
@@ -200,13 +215,17 @@ def open_writer(output_path: Path, frame_size: tuple[int, int], fps: float, code
 
 
 def build_output_path(
-    input_file: Path, output: Path | None, output_dir: Path, batch_mode: bool
+    input_file: Path,
+    output: Path | None,
+    output_dir: Path,
+    batch_mode: bool,
+    filename_suffix: str = "",
 ) -> Path:
     if output is not None and batch_mode:
         raise ValueError("--output can only be used when converting a single file.")
     if output is not None:
         return output
-    return output_dir / f"{input_file.stem}.mp4"
+    return output_dir / f"{input_file.stem}{filename_suffix}.mp4"
 
 
 def convert_file(
@@ -267,6 +286,7 @@ def main() -> int:
         layout = LAYOUT
         limit_frames = LIMIT_FRAMES
         codec = CODEC
+        filename_suffix = FILENAME_SUFFIX
     else:
         args = parse_args()
         input_path = args.input.resolve()
@@ -277,6 +297,7 @@ def main() -> int:
         layout = args.layout
         limit_frames = args.limit_frames
         codec = args.codec
+        filename_suffix = args.filename_suffix
 
     files = find_hdf5_files(input_path)
     batch_mode = len(files) > 1
@@ -287,6 +308,7 @@ def main() -> int:
             output=output,
             output_dir=output_dir,
             batch_mode=batch_mode,
+            filename_suffix=filename_suffix,
         )
         convert_file(
             input_file=input_file,

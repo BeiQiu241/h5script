@@ -1,0 +1,21 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local IDE files
+.idea/
+*.iml
+
+# Generated outputs
+csv_output/
+hdf5_output/
+mp4_output/
+web_output/
+ui_output/
+
+# Local smoke-test artifacts
+tmp_*/
+
+# OS junk
+Thumbs.db
+.DS_Store

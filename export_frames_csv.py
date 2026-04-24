@@ -20,8 +20,9 @@ except Exception as exc:  # pragma: no cover - import failure depends on local e
 # Fill in your own paths and options here, then run the script directly.
 INPUT_PATH = Path(r"D:\py projects\h5\LQ_20260225_01")
 MP4_DIR = Path(r"D:\py projects\h5\mp4_output")
-OUTPUT_CSV = Path(r"D:\py projects\h5\mp4_output\frames.csv")
+OUTPUT_DIR = Path(r"D:\py projects\h5\csv_output")
 FPS = 30.0
+HDF5_SUFFIXES = (".h5", ".hdf5")
 
 # Zero-based indices in action_eef.
 # This matches your description: columns 7-12 plus 13, where the last value is gripper.
@@ -50,7 +51,7 @@ def natural_key(path: Path) -> tuple:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export action_eef frame-aligned data to frames.csv."
+        description="Export action_eef data from HDF5 files into one CSV per file."
     )
     parser.add_argument(
         "input",
@@ -66,8 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path("mp4_output/frames.csv"),
-        help="Output CSV path.",
+        default=Path("csv_output"),
+        help="Output CSV directory. One CSV will be created for each HDF5 file.",
     )
     parser.add_argument(
         "--fps",
@@ -80,11 +81,17 @@ def parse_args() -> argparse.Namespace:
 
 def find_hdf5_files(input_path: Path) -> list[Path]:
     if input_path.is_file():
+        if input_path.suffix.lower() not in HDF5_SUFFIXES:
+            raise ValueError(f"Unsupported input file type: {input_path}")
         return [input_path]
     if input_path.is_dir():
-        files = sorted(input_path.glob("*.hdf5"), key=natural_key)
+        files = [
+            path for path in input_path.iterdir()
+            if path.is_file() and path.suffix.lower() in HDF5_SUFFIXES
+        ]
+        files = sorted(files, key=natural_key)
         if not files:
-            raise FileNotFoundError(f"No .hdf5 files found in: {input_path}")
+            raise FileNotFoundError(f"No .h5 or .hdf5 files found in: {input_path}")
         return files
     raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
@@ -111,18 +118,22 @@ def validate_columns(action_width: int) -> None:
         raise ValueError("ACTION_EEF_COLUMNS and ACTION_EEF_NAMES must have the same length.")
 
 
-def build_rows(hdf5_files: list[Path], mp4_dir: Path, fps: float) -> list[dict[str, object]]:
+def build_rows_for_file(hdf5_file: Path, mp4_dir: Path | None, fps: float) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for hdf5_file in hdf5_files:
-        mp4_path = mp4_dir / f"{hdf5_file.stem}.mp4"
-        if not mp4_path.exists():
-            raise FileNotFoundError(f"Missing matching MP4 file: {mp4_path}")
+    mp4_path: Path | None = None
 
-        with h5py.File(hdf5_file, "r") as h5_file:
-            action_eef = h5_file["action_eef"]
-            validate_columns(action_eef.shape[1])
-            hdf5_frame_count = int(action_eef.shape[0])
+    if mp4_dir is not None:
+        candidate = mp4_dir / f"{hdf5_file.stem}.mp4"
+        if candidate.exists():
+            mp4_path = candidate
 
+    with h5py.File(hdf5_file, "r") as h5_file:
+        action_eef = h5_file["action_eef"]
+        validate_columns(action_eef.shape[1])
+        hdf5_frame_count = int(action_eef.shape[0])
+        frame_count = hdf5_frame_count
+
+        if mp4_path is not None:
             mp4_frame_count = get_mp4_frame_count(mp4_path)
             frame_count = min(hdf5_frame_count, mp4_frame_count)
 
@@ -133,20 +144,21 @@ def build_rows(hdf5_files: list[Path], mp4_dir: Path, fps: float) -> list[dict[s
                     flush=True,
                 )
 
-            for frame_index in range(frame_count):
-                action_row = action_eef[frame_index]
-                row: dict[str, object] = {
-                    "episode": hdf5_file.stem,
-                    "frame_index": frame_index,
-                    "timestamp_sec": frame_index / fps,
-                    "mp4_file": str(mp4_path),
-                    "hdf5_file": str(hdf5_file),
-                }
-                for column_index, column_name in zip(ACTION_EEF_COLUMNS, ACTION_EEF_NAMES):
-                    row[column_name] = float(action_row[column_index])
-                rows.append(row)
+        for frame_index in range(frame_count):
+            action_row = action_eef[frame_index]
+            row: dict[str, object] = {
+                "episode": hdf5_file.stem,
+                "frame_index": frame_index,
+                "timestamp_sec": frame_index / fps,
+                "hdf5_file": str(hdf5_file),
+            }
+            if mp4_path is not None:
+                row["mp4_file"] = str(mp4_path)
+            for column_index, column_name in zip(ACTION_EEF_COLUMNS, ACTION_EEF_NAMES):
+                row[column_name] = float(action_row[column_index])
+            rows.append(row)
 
-        print(f"Prepared {frame_count} rows for {hdf5_file.name}", flush=True)
+    print(f"Prepared {frame_count} rows for {hdf5_file.name}", flush=True)
     return rows
 
 
@@ -162,6 +174,24 @@ def write_csv(output_csv: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def build_output_csv_name(hdf5_file: Path) -> str:
+    stem = hdf5_file.stem
+    if stem.startswith("episode_"):
+        suffix = stem[len("episode_"):]
+        return f"frames_{suffix}.csv"
+    return f"frames_{stem}.csv"
+
+
+def export_hdf5_files(hdf5_files: list[Path], output_dir: Path, mp4_dir: Path | None, fps: float) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for hdf5_file in hdf5_files:
+        rows = build_rows_for_file(hdf5_file, mp4_dir=mp4_dir, fps=fps)
+        output_csv = output_dir / build_output_csv_name(hdf5_file)
+        write_csv(output_csv, rows)
+        print(f"Saved CSV: {output_csv}", flush=True)
+
+
 def main() -> int:
     if IMPORT_ERROR is not None:
         print("Required packages are unavailable in the current Python environment.", file=sys.stderr)
@@ -170,20 +200,18 @@ def main() -> int:
 
     if len(sys.argv) == 1:
         input_path = INPUT_PATH.resolve()
-        mp4_dir = MP4_DIR.resolve()
-        output_csv = OUTPUT_CSV.resolve()
+        mp4_dir = MP4_DIR.resolve() if MP4_DIR.exists() else None
+        output_dir = OUTPUT_DIR.resolve()
         fps = FPS
     else:
         args = parse_args()
         input_path = args.input.resolve()
-        mp4_dir = args.mp4_dir.resolve()
-        output_csv = args.output_csv.resolve()
+        mp4_dir = args.mp4_dir.resolve() if args.mp4_dir.exists() else None
+        output_dir = args.output_csv.resolve()
         fps = args.fps
 
     hdf5_files = find_hdf5_files(input_path)
-    rows = build_rows(hdf5_files, mp4_dir=mp4_dir, fps=fps)
-    write_csv(output_csv, rows)
-    print(f"Saved CSV: {output_csv}", flush=True)
+    export_hdf5_files(hdf5_files, output_dir=output_dir, mp4_dir=mp4_dir, fps=fps)
     return 0
 
 
